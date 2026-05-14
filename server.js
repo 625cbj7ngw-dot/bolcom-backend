@@ -11,7 +11,6 @@ async function getBolToken() {
   const res = await axios.post('https://login.bol.com/token?grant_type=client_credentials', null, { headers: { Authorization: `Basic ${credentials}` } });
   accessToken = res.data.access_token;
   tokenExpiry = Date.now() + (res.data.expires_in - 60) * 1000;
-  console.log('[Auth] Token ontvangen');
   return accessToken;
 }
 async function fetchOrders(status) {
@@ -27,13 +26,11 @@ async function fetchOrderDetail(orderId) {
 async function sendPush(title, body, data) {
   if (!pushTokens.size) return;
   await axios.post('https://exp.host/--/api/v2/push/send', [...pushTokens].map(t => ({ to: t, sound: 'default', title, body, data, badge: 1 })));
-  console.log('[Push] Verstuurd:', title);
 }
 async function checkNewOrders() {
-  console.log('[Poll] Checken...', new Date().toLocaleTimeString('nl-NL'));
   try {
     const orders = await fetchOrders('OPEN');
-    if (isFirstRun) { orders.forEach(o => knownOrderIds.add(o.orderId)); isFirstRun = false; console.log('[Poll] Eerste run:', orders.length, 'bestellingen'); return; }
+    if (isFirstRun) { orders.forEach(o => knownOrderIds.add(o.orderId)); isFirstRun = false; return; }
     for (const order of orders.filter(o => !knownOrderIds.has(o.orderId))) {
       knownOrderIds.add(order.orderId);
       let detail = null;
@@ -42,14 +39,15 @@ async function checkNewOrders() {
       const total = detail?.orderItems?.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0) || 0;
       await sendPush('Nieuwe bestelling! #' + order.orderId, product + ' - EUR' + total.toFixed(2), { orderId: order.orderId });
     }
-    console.log('[Poll] Geen nieuwe bestellingen.');
-  } catch(e) { console.error('[Poll] Fout:', e.message); if (e.response?.status === 401) accessToken = null; }
+  } catch(e) { if (e.response?.status === 401) accessToken = null; }
 }
 app.post('/register-token', (req, res) => { pushTokens.add(req.body.token); res.json({ success: true }); });
 app.get('/orders', async (req, res) => {
   try {
-    const orders = await fetchOrders('OPEN');
-    const detailed = await Promise.allSettled(orders.slice(0, 20).map(o => fetchOrderDetail(o.orderId)));
+    const [open, shipped, delivered] = await Promise.all([fetchOrders('OPEN'), fetchOrders('SHIPPED'), fetchOrders('DELIVERED')]);
+    const allOrders = [...open, ...shipped, ...delivered];
+    console.log('[Orders] Opgehaald:', allOrders.length);
+    const detailed = await Promise.allSettled(allOrders.slice(0, 30).map(o => fetchOrderDetail(o.orderId)));
     res.json({ orders: detailed.filter(r => r.status === 'fulfilled').map(r => r.value) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
