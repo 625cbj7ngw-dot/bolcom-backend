@@ -126,6 +126,7 @@ async function syncOrdersForUser(user) {
   console.log("[Sync] Start voor:", user.email);
   if (!user.bol_client_id || !user.bol_client_secret) { console.log("[Sync] Geen credentials"); return; }
   console.log("[Sync] Credentials gevonden, ophalen token...");
+  try { await getBolToken(user); console.log("[Sync] Token OK!"); } catch(e) { console.error("[Sync] Token fout:", e.response?.data || e.message); return; }
   try {
     const orders = await fetchOrders(user, 'OPEN');
     const knownIds = user.known_order_ids || [];
