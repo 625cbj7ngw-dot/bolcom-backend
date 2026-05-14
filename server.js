@@ -71,13 +71,13 @@ async function checkNewOrders() {
 app.post('/register-token', (req, res) => { pushTokens.add(req.body.token); res.json({ success: true }); });
 app.get('/orders', async (req, res) => {
   try {
-    const [openOrders, shipments] = await Promise.all([
-      fetchOrdersByStatus('OPEN'),
+    const [openOrders, shippedOrders, shipments] = await Promise.all([
+      fetchOrdersByStatus("OPEN"), fetchOrdersByStatus("SHIPPED"),
       fetchShipments()
     ]);
     const shipmentOrderIds = [...new Set(shipments.flatMap(s => s.orderItems?.map(i => i.orderId) || []))];
     console.log('[Orders] Open:', openOrders.length, '| Shipment order IDs:', shipmentOrderIds.length);
-    const allOrderIds = [...new Set([...openOrders.map(o => o.orderId), ...shipmentOrderIds])];
+    const allOrderIds = [...new Set([...[...openOrders, ...shippedOrders].map(o => o.orderId), ...shipmentOrderIds])];
     const detailed = await Promise.allSettled(allOrderIds.slice(0, 50).map(id => fetchOrderDetail(id)));
     const orders = detailed.filter(r => r.status === 'fulfilled').map(r => r.value);
     console.log('[Orders] Totaal opgehaald:', orders.length);
