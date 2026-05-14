@@ -101,6 +101,26 @@ async function syncOrders() {
           const product = detail.orderItems?.[0]?.product?.title || 'product';
           const total = detail.orderItems?.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0) || 0;
           await sendPush('Nieuwe bestelling! #' + order.orderId, product + ' — €' + total.toFixed(2), { orderId: order.orderId });
+      
+      // Auto-decrease inventory
+      if (detail && detail.orderItems) {
+        let stockWarnings = [];
+        detail.orderItems.forEach(item => {
+          const ean = item.product?.ean;
+          if (!ean) return;
+          const idx = inventoryCache.findIndex(i => i.ean === ean);
+          if (idx !== -1) {
+            inventoryCache[idx].stock = Math.max(0, inventoryCache[idx].stock - (item.quantity || 1));
+            console.log('[Inventory] Voorraad verlaagd voor', ean, 'naar', inventoryCache[idx].stock);
+            if (inventoryCache[idx].stock <= 3) {
+              stockWarnings.push(inventoryCache[idx].name + ' nog maar ' + inventoryCache[idx].stock + ' stuks!');
+            }
+          }
+        });
+        if (stockWarnings.length > 0) {
+          await sendPush('⚠️ Lage voorraad!', stockWarnings.join(', '), {});
+        }
+      }
         }
       }
     }
