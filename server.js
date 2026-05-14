@@ -312,7 +312,8 @@ app.get('/health', (req, res) => {
 async function syncAllUsers() {
   try {
     const result = await pool.query('SELECT * FROM users WHERE bol_client_id IS NOT NULL');
-    console.log('[Poll] Checken voor', result.rows.length, 'gebruikers...');
+    console.log("[Poll] Checken voor", result.rows.length, "gebruikers...");
+    result.rows.forEach(u => console.log("[Poll] User:", u.email, "bolId:", u.bol_client_id ? "JA" : "NEE"));
     for (const user of result.rows) {
       user.push_tokens = user.push_tokens || [];
       user.inventory = user.inventory || [];
