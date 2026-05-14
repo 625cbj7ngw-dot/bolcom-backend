@@ -15,13 +15,11 @@ function loadCache() {
       ordersCache = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
       console.log('[Cache] Geladen:', Object.keys(ordersCache).length, 'bestellingen');
     }
-  } catch(e) { console.log('[Cache] Fout bij laden:', e.message); }
+  } catch(e) {}
 }
 
 function saveCache() {
-  try {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(ordersCache));
-  } catch(e) { console.log('[Cache] Fout bij opslaan:', e.message); }
+  try { fs.writeFileSync(CACHE_FILE, JSON.stringify(ordersCache)); } catch(e) {}
 }
 
 async function getBolToken() {
@@ -56,6 +54,23 @@ async function fetchOrderDetail(orderId) {
   return res.data;
 }
 
+async function fetchInventory() {
+  const token = await getBolToken();
+  let allOffers = [];
+  for (let page = 1; page <= 10; page++) {
+    try {
+      const res = await axios.get('https://api.bol.com/retailer/offers', {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.retailer.v10+json' },
+        params: { page }
+      });
+      const offers = res.data.offers || [];
+      if (offers.length === 0) break;
+      allOffers = [...allOffers, ...offers];
+    } catch(e) { console.log('[Inventory] Fout:', e.message); break; }
+  }
+  return allOffers;
+}
+
 async function sendPush(title, body, data) {
   if (!pushTokens.size) return;
   await axios.post('https://exp.host/--/api/v2/push/send', [...pushTokens].map(t => ({ to: t, sound: 'default', title, body, data, badge: 1 })));
@@ -67,10 +82,7 @@ async function syncOrders() {
     if (isFirstRun) {
       for (const order of orders) {
         if (!ordersCache[order.orderId]) {
-          try {
-            const detail = await fetchOrderDetail(order.orderId);
-            ordersCache[order.orderId] = detail;
-          } catch(e) {}
+          try { ordersCache[order.orderId] = await fetchOrderDetail(order.orderId); } catch(e) {}
         }
       }
       saveCache();
@@ -87,28 +99,28 @@ async function syncOrders() {
           saveCache();
           const product = detail.orderItems?.[0]?.product?.title || 'product';
           const total = detail.orderItems?.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0) || 0;
-          await sendPush('🛍️ Nieuwe bestelling! #' + order.orderId, product + ' — €' + total.toFixed(2), { orderId: order.orderId });
+          await sendPush('Nieuwe bestelling! #' + order.orderId, product + ' — €' + total.toFixed(2), { orderId: order.orderId });
         }
-      } else {
-        try {
-          const detail = await fetchOrderDetail(order.orderId);
-          ordersCache[order.orderId] = detail;
-        } catch(e) {}
       }
     }
     saveCache();
-    console.log('[Sync] Cache bijgewerkt:', Object.keys(ordersCache).length, 'bestellingen');
+    console.log('[Sync] Cache:', Object.keys(ordersCache).length, 'bestellingen');
   } catch(e) { console.error('[Sync] Fout:', e.message); if (e.response?.status === 401) accessToken = null; }
 }
 
 app.post('/register-token', (req, res) => { pushTokens.add(req.body.token); res.json({ success: true }); });
 
 app.get('/orders', (req, res) => {
-  const orders = Object.values(ordersCache).sort((a, b) => {
-    return new Date(b.orderPlacedDateTime) - new Date(a.orderPlacedDateTime);
-  });
-  console.log('[Orders] Serveer uit cache:', orders.length);
+  const orders = Object.values(ordersCache).sort((a, b) => new Date(b.orderPlacedDateTime) - new Date(a.orderPlacedDateTime));
   res.json({ orders });
+});
+
+app.get('/inventory', async (req, res) => {
+  try {
+    const offers = await fetchInventory();
+    console.log('[Inventory] Opgehaald:', offers.length, 'producten');
+    res.json({ offers });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', tokens: pushTokens.size, cached: Object.keys(ordersCache).length }));
