@@ -124,7 +124,8 @@ async function sendPush(pushTokens, title, body, data) {
 
 async function syncOrdersForUser(user) {
   console.log("[Sync] Start voor:", user.email);
-  if (!user.bol_client_id || !user.bol_client_secret) return;
+  if (!user.bol_client_id || !user.bol_client_secret) { console.log("[Sync] Geen credentials"); return; }
+  console.log("[Sync] Credentials gevonden, ophalen token...");
   try {
     const orders = await fetchOrders(user, 'OPEN');
     const knownIds = user.known_order_ids || [];
