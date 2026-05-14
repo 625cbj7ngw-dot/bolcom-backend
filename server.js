@@ -123,6 +123,7 @@ async function sendPush(pushTokens, title, body, data) {
 }
 
 async function syncOrdersForUser(user) {
+  console.log("[Sync] Start voor:", user.email);
   if (!user.bol_client_id || !user.bol_client_secret) return;
   try {
     const orders = await fetchOrders(user, 'OPEN');
