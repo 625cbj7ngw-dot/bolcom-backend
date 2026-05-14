@@ -29,6 +29,22 @@ async function fetchOrdersByStatus(status) {
   }
   return allOrders;
 }
+async function fetchShipments() {
+  const token = await getBolToken();
+  let allShipments = [];
+  for (let page = 1; page <= 5; page++) {
+    try {
+      const res = await axios.get('https://api.bol.com/retailer/shipments', {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.retailer.v10+json' },
+        params: { page }
+      });
+      const shipments = res.data.shipments || [];
+      if (shipments.length === 0) break;
+      allShipments = [...allShipments, ...shipments];
+    } catch(e) { console.log('[Shipments] Fout:', e.message); break; }
+  }
+  return allShipments;
+}
 async function fetchOrderDetail(orderId) {
   const token = await getBolToken();
   const res = await axios.get(`https://api.bol.com/retailer/orders/${orderId}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.retailer.v10+json' } });
@@ -55,15 +71,18 @@ async function checkNewOrders() {
 app.post('/register-token', (req, res) => { pushTokens.add(req.body.token); res.json({ success: true }); });
 app.get('/orders', async (req, res) => {
   try {
-    const statuses = ['OPEN', 'SHIPPED', 'ALL'];
-    const results = await Promise.allSettled(statuses.map(s => fetchOrdersByStatus(s)));
-    const combined = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
-    const seen = new Set();
-    const unique = combined.filter(o => { if (seen.has(o.orderId)) return false; seen.add(o.orderId); return true; });
-    console.log('[Orders] Uniek opgehaald:', unique.length);
-    const detailed = await Promise.allSettled(unique.slice(0, 50).map(o => fetchOrderDetail(o.orderId)));
-    res.json({ orders: detailed.filter(r => r.status === 'fulfilled').map(r => r.value) });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const [openOrders, shipments] = await Promise.all([
+      fetchOrdersByStatus('OPEN'),
+      fetchShipments()
+    ]);
+    const shipmentOrderIds = [...new Set(shipments.flatMap(s => s.orderItems?.map(i => i.orderId) || []))];
+    console.log('[Orders] Open:', openOrders.length, '| Shipment order IDs:', shipmentOrderIds.length);
+    const allOrderIds = [...new Set([...openOrders.map(o => o.orderId), ...shipmentOrderIds])];
+    const detailed = await Promise.allSettled(allOrderIds.slice(0, 50).map(id => fetchOrderDetail(id)));
+    const orders = detailed.filter(r => r.status === 'fulfilled').map(r => r.value);
+    console.log('[Orders] Totaal opgehaald:', orders.length);
+    res.json({ orders });
+  } catch(e) { console.error('[Orders] Fout:', e.message); res.status(500).json({ error: e.message }); }
 });
 app.get('/health', (req, res) => res.json({ status: 'ok', tokens: pushTokens.size }));
 app.listen(CONFIG.PORT, () => console.log('Server draait op poort', CONFIG.PORT));
