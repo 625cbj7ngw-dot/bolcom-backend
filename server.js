@@ -8,6 +8,7 @@ const CONFIG = { BOL_CLIENT_ID: process.env.BOL_CLIENT_ID, BOL_CLIENT_SECRET: pr
 const CACHE_FILE = '/tmp/orders_cache.json';
 let accessToken = null, tokenExpiry = null, pushTokens = new Set(), isFirstRun = true;
 let ordersCache = {};
+let inventoryCache = [];
 
 function loadCache() {
   try {
@@ -121,6 +122,18 @@ app.get('/inventory', async (req, res) => {
     console.log('[Inventory] Opgehaald:', offers.length, 'producten');
     res.json({ offers });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/inventory-items', (req, res) => {
+  res.json({ items: inventoryCache });
+});
+
+app.post('/inventory-items', (req, res) => {
+  const { items } = req.body;
+  if (!Array.isArray(items)) return res.status(400).json({ error: 'items moet een array zijn' });
+  inventoryCache = items;
+  console.log('[Inventory] Opgeslagen:', items.length, 'items');
+  res.json({ success: true, count: items.length });
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', tokens: pushTokens.size, cached: Object.keys(ordersCache).length }));
