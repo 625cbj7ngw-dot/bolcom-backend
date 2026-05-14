@@ -44,10 +44,11 @@ async function checkNewOrders() {
 app.post('/register-token', (req, res) => { pushTokens.add(req.body.token); res.json({ success: true }); });
 app.get('/orders', async (req, res) => {
   try {
-    const [open, shipped, delivered] = await Promise.all([fetchOrders('OPEN'), fetchOrders('SHIPPED'), fetchOrders('ALL')]);
-    const allOrders = [...open, ...shipped, ...delivered];
-    console.log('[Orders] Opgehaald:', allOrders.length);
-    const detailed = await Promise.allSettled(allOrders.slice(0, 30).map(o => fetchOrderDetail(o.orderId)));
+    const allOrders = await fetchOrders('ALL');
+    const seen = new Set();
+    const unique = allOrders.filter(o => { if (seen.has(o.orderId)) return false; seen.add(o.orderId); return true; });
+    console.log('[Orders] Uniek opgehaald:', unique.length);
+    const detailed = await Promise.allSettled(unique.slice(0, 30).map(o => fetchOrderDetail(o.orderId)));
     res.json({ orders: detailed.filter(r => r.status === 'fulfilled').map(r => r.value) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
