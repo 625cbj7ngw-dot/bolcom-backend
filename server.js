@@ -1,65 +1,92 @@
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
-const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Resend } = require('resend');
-const resend = new Resend(process.env.RESEND_API_KEY);
+const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json());
+
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const CONFIG = {
   PORT: process.env.PORT || 3000,
   JWT_SECRET: process.env.JWT_SECRET || 'cktech-secret-2026',
 };
 
-// ── In-memory database (later PostgreSQL) ─────────────────────────────────────
-const DB_FILE = '/tmp/cktech_db.json';
-let db = { users: [], sessions: {}, resetTokens: {} };
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
-function loadDB() {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-      console.log('[DB] Geladen:', db.users.length, 'gebruikers');
-    }
-  } catch(e) { console.log('[DB] Nieuw database aangemaakt'); }
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      name TEXT,
+      store_name TEXT,
+      bol_client_id TEXT,
+      bol_client_secret TEXT,
+      push_tokens JSONB DEFAULT '[]',
+      inventory JSONB DEFAULT '[]',
+      orders_cache JSONB DEFAULT '{}',
+      known_order_ids JSONB DEFAULT '[]',
+      first_run BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS reset_tokens (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      expiry BIGINT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  console.log('[DB] Database klaar!');
 }
 
-function saveDB() {
-  try { fs.writeFileSync(DB_FILE, JSON.stringify(db)); } catch(e) {}
+async function getUser(id) {
+  const res = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+  return res.rows[0] || null;
 }
 
-// ── Auth middleware ────────────────────────────────────────────────────────────
-function authMiddleware(req, res, next) {
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token) return res.status(401).json({ error: 'Niet ingelogd' });
-  try {
-    const decoded = jwt.verify(token, CONFIG.JWT_SECRET);
-    const user = db.users.find(u => u.id === decoded.userId);
-    if (!user) return res.status(401).json({ error: 'Gebruiker niet gevonden' });
-    req.user = user;
-    next();
-  } catch(e) { res.status(401).json({ error: 'Sessie verlopen, log opnieuw in' }); }
+async function getUserByEmail(email) {
+  const res = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+  return res.rows[0] || null;
 }
 
-// ── Bol.com token per gebruiker ───────────────────────────────────────────────
+async function saveUser(user) {
+  await pool.query(`
+    INSERT INTO users (id, email, password, name, store_name, bol_client_id, bol_client_secret, push_tokens, inventory, orders_cache, known_order_ids, first_run)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    ON CONFLICT (id) DO UPDATE SET
+      email = $2, password = $3, name = $4, store_name = $5,
+      bol_client_id = $6, bol_client_secret = $7, push_tokens = $8,
+      inventory = $9, orders_cache = $10, known_order_ids = $11, first_run = $12
+  `, [
+    user.id, user.email, user.password, user.name, user.store_name,
+    user.bol_client_id, user.bol_client_secret,
+    JSON.stringify(user.push_tokens || []),
+    JSON.stringify(user.inventory || []),
+    JSON.stringify(user.orders_cache || {}),
+    JSON.stringify(user.known_order_ids || []),
+    user.first_run || false
+  ]);
+}
+
 const tokenCache = {};
 
 async function getBolToken(user) {
   const cache = tokenCache[user.id];
   if (cache && cache.expiry > Date.now()) return cache.token;
-  
-  const credentials = Buffer.from(`${user.bolClientId}:${user.bolClientSecret}`).toString('base64');
+  const credentials = Buffer.from(`${user.bol_client_id}:${user.bol_client_secret}`).toString('base64');
   const res = await axios.post('https://login.bol.com/token?grant_type=client_credentials', null, {
     headers: { Authorization: `Basic ${credentials}` }
   });
-  tokenCache[user.id] = {
-    token: res.data.access_token,
-    expiry: Date.now() + (res.data.expires_in - 60) * 1000
-  };
+  tokenCache[user.id] = { token: res.data.access_token, expiry: Date.now() + (res.data.expires_in - 60) * 1000 };
   return tokenCache[user.id].token;
 }
 
@@ -95,305 +122,209 @@ async function sendPush(pushTokens, title, body, data) {
   );
 }
 
-// ── Poll orders per gebruiker ─────────────────────────────────────────────────
 async function syncOrdersForUser(user) {
+  if (!user.bol_client_id || !user.bol_client_secret) return;
   try {
     const orders = await fetchOrders(user, 'OPEN');
-    if (!user.knownOrderIds) user.knownOrderIds = [];
-    if (!user.ordersCache) user.ordersCache = {};
-    if (!user.firstRun) {
-      orders.forEach(o => {
-        if (!user.knownOrderIds.includes(o.orderId)) user.knownOrderIds.push(o.orderId);
-        user.ordersCache[o.orderId] = o;
-      });
-      user.firstRun = true;
-      saveDB();
+    const knownIds = user.known_order_ids || [];
+    const ordersCache = user.orders_cache || {};
+
+    if (!user.first_run) {
+      orders.forEach(o => { if (!knownIds.includes(o.orderId)) knownIds.push(o.orderId); });
+      user.known_order_ids = knownIds;
+      user.first_run = true;
+      await saveUser(user);
       return;
     }
+
+    let changed = false;
     for (const order of orders) {
-      if (!user.knownOrderIds.includes(order.orderId)) {
-        user.knownOrderIds.push(order.orderId);
+      if (!knownIds.includes(order.orderId)) {
+        knownIds.push(order.orderId);
         let detail = null;
         try { detail = await fetchOrderDetail(user, order.orderId); } catch(e) {}
         if (detail) {
-          user.ordersCache[order.orderId] = detail;
-          saveDB();
+          ordersCache[order.orderId] = detail;
+          changed = true;
           const product = detail.orderItems?.[0]?.product?.title || 'product';
           const total = detail.orderItems?.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0) || 0;
-          await sendPush(user.pushTokens || [], '🛍️ Nieuwe bestelling!', product + ' — €' + total.toFixed(2), { orderId: order.orderId });
+          await sendPush(user.push_tokens || [], 'Nieuwe bestelling! #' + order.orderId, product + ' — €' + total.toFixed(2), { orderId: order.orderId });
 
-          // Auto decrease inventory
           if (detail.orderItems) {
+            const inventory = user.inventory || [];
             detail.orderItems.forEach(item => {
               const ean = item.product?.ean;
-              if (!ean || !user.inventory) return;
-              const idx = user.inventory.findIndex(i => i.ean === ean);
+              if (!ean) return;
+              const idx = inventory.findIndex(i => i.ean === ean);
               if (idx !== -1) {
-                user.inventory[idx].stock = Math.max(0, user.inventory[idx].stock - (item.quantity || 1));
-                if (user.inventory[idx].stock <= 3) {
-                  sendPush(user.pushTokens || [], '⚠️ Lage voorraad!', user.inventory[idx].name + ' nog maar ' + user.inventory[idx].stock + ' stuks!', {});
+                inventory[idx].stock = Math.max(0, inventory[idx].stock - (item.quantity || 1));
+                if (inventory[idx].stock <= 3) {
+                  sendPush(user.push_tokens || [], 'Lage voorraad!', inventory[idx].name + ' nog maar ' + inventory[idx].stock + ' stuks!', {});
                 }
               }
             });
-            saveDB();
+            user.inventory = inventory;
           }
         }
       }
     }
+
+    if (changed) {
+      user.known_order_ids = knownIds;
+      user.orders_cache = ordersCache;
+      await saveUser(user);
+    }
   } catch(e) { console.error('[Sync] Fout voor', user.email, ':', e.message); }
 }
 
-// ── AUTH ROUTES ───────────────────────────────────────────────────────────────
+function authMiddleware(req, res, next) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Niet ingelogd' });
+  try {
+    const decoded = jwt.verify(token, CONFIG.JWT_SECRET);
+    pool.query('SELECT * FROM users WHERE id = $1', [decoded.userId]).then(result => {
+      if (!result.rows[0]) return res.status(401).json({ error: 'Gebruiker niet gevonden' });
+      req.user = result.rows[0];
+      req.user.push_tokens = req.user.push_tokens || [];
+      req.user.inventory = req.user.inventory || [];
+      req.user.orders_cache = req.user.orders_cache || {};
+      req.user.known_order_ids = req.user.known_order_ids || [];
+      next();
+    });
+  } catch(e) { res.status(401).json({ error: 'Sessie verlopen' }); }
+}
 
-// Registreren
 app.post('/auth/register', async (req, res) => {
   const { email, password, name, storeName } = req.body;
   if (!email || !password || !name) return res.status(400).json({ error: 'Email, wachtwoord en naam zijn verplicht' });
-  if (db.users.find(u => u.email === email)) return res.status(400).json({ error: 'Email al in gebruik' });
-  
+  if (await getUserByEmail(email)) return res.status(400).json({ error: 'Email al in gebruik' });
   const hashedPassword = await bcrypt.hash(password, 10);
-  const user = {
-    id: Date.now().toString(),
-    email,
-    password: hashedPassword,
-    name,
-    storeName: storeName || name,
-    bolClientId: null,
-    bolClientSecret: null,
-    pushTokens: [],
-    inventory: [],
-    ordersCache: {},
-    knownOrderIds: [],
-    firstRun: false,
-    createdAt: new Date().toISOString(),
-  };
-  db.users.push(user);
-  saveDB();
-  
+  const user = { id: Date.now().toString(), email, password: hashedPassword, name, store_name: storeName || name, bol_client_id: null, bol_client_secret: null, push_tokens: [], inventory: [], orders_cache: {}, known_order_ids: [], first_run: false };
+  await saveUser(user);
   const token = jwt.sign({ userId: user.id }, CONFIG.JWT_SECRET, { expiresIn: '30d' });
   console.log('[Auth] Nieuwe gebruiker:', email);
-  res.json({ token, user: { id: user.id, email, name, storeName: user.storeName, hasBolCredentials: false } });
+  res.json({ token, user: { id: user.id, email, name, storeName: user.store_name, hasBolCredentials: false } });
 });
 
-// Inloggen
 app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
-  const user = db.users.find(u => u.email === email);
+  const user = await getUserByEmail(email);
   if (!user) return res.status(400).json({ error: 'Email of wachtwoord onjuist' });
-  
   const valid = await bcrypt.compare(password, user.password);
   if (!valid) return res.status(400).json({ error: 'Email of wachtwoord onjuist' });
-  
   const token = jwt.sign({ userId: user.id }, CONFIG.JWT_SECRET, { expiresIn: '30d' });
   console.log('[Auth] Ingelogd:', email);
-  res.json({ token, user: { id: user.id, email, name: user.name, storeName: user.storeName, hasBolCredentials: !!(user.bolClientId && user.bolClientSecret) } });
+  res.json({ token, user: { id: user.id, email, name: user.name, storeName: user.store_name, hasBolCredentials: !!(user.bol_client_id && user.bol_client_secret) } });
 });
 
-// Profiel
 app.get('/auth/me', authMiddleware, (req, res) => {
   const u = req.user;
-  res.json({ id: u.id, email: u.email, name: u.name, storeName: u.storeName, hasBolCredentials: !!(u.bolClientId && u.bolClientSecret) });
+  res.json({ id: u.id, email: u.email, name: u.name, storeName: u.store_name, hasBolCredentials: !!(u.bol_client_id && u.bol_client_secret) });
 });
 
-// Bol.com credentials koppelen
 app.post('/auth/bol-credentials', authMiddleware, async (req, res) => {
   const { clientId, clientSecret } = req.body;
   if (!clientId || !clientSecret) return res.status(400).json({ error: 'Client ID en Secret zijn verplicht' });
-  
-  // Test credentials
   try {
     const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-    await axios.post('https://login.bol.com/token?grant_type=client_credentials', null, {
-      headers: { Authorization: `Basic ${credentials}` }
-    });
+    await axios.post('https://login.bol.com/token?grant_type=client_credentials', null, { headers: { Authorization: `Basic ${credentials}` } });
   } catch(e) { return res.status(400).json({ error: 'Ongeldige bol.com credentials' }); }
-  
-  req.user.bolClientId = clientId;
-  req.user.bolClientSecret = clientSecret;
-  req.user.firstRun = false;
-  saveDB();
-  console.log('[Auth] Bol credentials gekoppeld voor:', req.user.email);
+  req.user.bol_client_id = clientId;
+  req.user.bol_client_secret = clientSecret;
+  req.user.first_run = false;
+  await saveUser(req.user);
   res.json({ success: true });
 });
 
-// ── USER ROUTES ───────────────────────────────────────────────────────────────
+app.post('/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  const user = await getUserByEmail(email);
+  if (!user) return res.json({ success: true });
+  const resetToken = require('crypto').randomBytes(32).toString('hex');
+  const code = resetToken.substring(0, 6).toUpperCase();
+  await pool.query('INSERT INTO reset_tokens (token, user_id, expiry) VALUES ($1, $2, $3)', [resetToken, user.id, Date.now() + 3600000]);
+  try {
+    await resend.emails.send({
+      from: 'CKTech <onboarding@resend.dev>',
+      to: email,
+      subject: 'Wachtwoord resetten - CKTech',
+      html: `<div style="font-family:Arial;max-width:500px;margin:0 auto"><h1 style="color:#FF6B35">CKTech®</h1><h2>Wachtwoord resetten</h2><p>Hoi ${user.name},</p><p>Gebruik deze code in de app:</p><div style="background:#f5f5f5;padding:20px;border-radius:8px;text-align:center;margin:20px 0"><h1 style="color:#FF6B35;letter-spacing:8px;font-size:32px">${code}</h1></div><p>Deze code is 1 uur geldig.</p></div>`
+    });
+    console.log('[Auth] Reset email verstuurd naar:', email);
+    res.json({ success: true });
+  } catch(e) {
+    console.error('[Auth] Email fout:', e.message);
+    res.status(500).json({ error: 'Email versturen mislukt: ' + e.message });
+  }
+});
 
-// Push token registreren
-app.post('/register-token', authMiddleware, (req, res) => {
+app.post('/auth/reset-password', async (req, res) => {
+  const { code, newPassword } = req.body;
+  if (!code || !newPassword) return res.status(400).json({ error: 'Code en nieuw wachtwoord zijn verplicht' });
+  const result = await pool.query('SELECT * FROM reset_tokens WHERE UPPER(SUBSTRING(token, 1, 6)) = $1', [code.toUpperCase()]);
+  if (!result.rows[0]) return res.status(400).json({ error: 'Ongeldige code' });
+  const resetData = result.rows[0];
+  if (resetData.expiry < Date.now()) {
+    await pool.query('DELETE FROM reset_tokens WHERE token = $1', [resetData.token]);
+    return res.status(400).json({ error: 'Code verlopen, vraag een nieuwe aan' });
+  }
+  const user = await getUser(resetData.user_id);
+  if (!user) return res.status(400).json({ error: 'Gebruiker niet gevonden' });
+  user.password = await bcrypt.hash(newPassword, 10);
+  await saveUser(user);
+  await pool.query('DELETE FROM reset_tokens WHERE token = $1', [resetData.token]);
+  console.log('[Auth] Wachtwoord gereset voor:', user.email);
+  res.json({ success: true });
+});
+
+app.post('/register-token', authMiddleware, async (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: 'Token vereist' });
-  if (!req.user.pushTokens) req.user.pushTokens = [];
-  if (!req.user.pushTokens.includes(token)) req.user.pushTokens.push(token);
-  saveDB();
+  const tokens = req.user.push_tokens || [];
+  if (!tokens.includes(token)) tokens.push(token);
+  req.user.push_tokens = tokens;
+  await saveUser(req.user);
   res.json({ success: true });
 });
 
-// Bestellingen
 app.get('/orders', authMiddleware, (req, res) => {
-  if (!req.user.bolClientId) return res.status(400).json({ error: 'Geen bol.com credentials gekoppeld' });
-  const orders = Object.values(req.user.ordersCache || {}).sort((a, b) => new Date(b.orderPlacedDateTime) - new Date(a.orderPlacedDateTime));
+  if (!req.user.bol_client_id) return res.status(400).json({ error: 'Geen bol.com credentials gekoppeld' });
+  const orders = Object.values(req.user.orders_cache || {}).sort((a, b) => new Date(b.orderPlacedDateTime) - new Date(a.orderPlacedDateTime));
   res.json({ orders });
 });
 
-// Voorraad
 app.get('/inventory-items', authMiddleware, (req, res) => {
   res.json({ items: req.user.inventory || [] });
 });
 
-app.post('/inventory-items', authMiddleware, (req, res) => {
+app.post('/inventory-items', authMiddleware, async (req, res) => {
   const { items } = req.body;
   if (!Array.isArray(items)) return res.status(400).json({ error: 'items moet een array zijn' });
   req.user.inventory = items;
-  saveDB();
+  await saveUser(req.user);
   res.json({ success: true });
 });
 
-// Wachtwoord vergeten
-app.post('/auth/forgot-password', async (req, res) => {
-  const { email } = req.body;
-  const user = db.users.find(u => u.email === email);
-  if (!user) return res.json({ success: true }); // Niet verklappen of email bestaat
-
-  const resetToken = require('crypto').randomBytes(32).toString('hex');
-  db.resetTokens[resetToken] = { userId: user.id, expiry: Date.now() + 3600000 }; // 1 uur geldig
-  saveDB();
-
-  try {
-    await resend.emails.send({
-      from: 'CKTech <onboarding@resend.dev>',
-      to: email,
-      subject: 'Wachtwoord resetten - CKTech',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto;">
-          <h1 style="color: #FF6B35;">CKTech®</h1>
-          <h2>Wachtwoord resetten</h2>
-          <p>Hoi ${user.name},</p>
-          <p>Je hebt een wachtwoord reset aangevraagd. Gebruik de code hieronder in de app:</p>
-          <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
-            <h1 style="color: #FF6B35; letter-spacing: 8px; font-size: 32px;">${resetToken.substring(0, 6).toUpperCase()}</h1>
-          </div>
-          <p>Deze code is 1 uur geldig.</p>
-          <p>Als je dit niet hebt aangevraagd, kun je deze email negeren.</p>
-          <p>Met vriendelijke groet,<br>CKTech Team</p>
-        </div>
-      `
-    });
-    console.log('[Auth] Reset email verstuurd naar:', email);
-    res.json({ success: true });
-  } catch(e) {
-    console.error('[Auth] Email fout:', e.message);
-    res.status(500).json({ error: 'Email versturen mislukt' });
-  }
-});
-
-// Wachtwoord resetten
-app.post('/auth/reset-password', async (req, res) => {
-  const { code, newPassword } = req.body;
-  if (!code || !newPassword) return res.status(400).json({ error: 'Code en nieuw wachtwoord zijn verplicht' });
-  
-  const fullToken = Object.keys(db.resetTokens).find(t => t.substring(0, 6).toUpperCase() === code.toUpperCase());
-  if (!fullToken) return res.status(400).json({ error: 'Ongeldige code' });
-  
-  const resetData = db.resetTokens[fullToken];
-  if (resetData.expiry < Date.now()) {
-    delete db.resetTokens[fullToken];
-    saveDB();
-    return res.status(400).json({ error: 'Code verlopen, vraag een nieuwe aan' });
-  }
-  
-  const user = db.users.find(u => u.id === resetData.userId);
-  if (!user) return res.status(400).json({ error: 'Gebruiker niet gevonden' });
-  
-  user.password = await bcrypt.hash(newPassword, 10);
-  delete db.resetTokens[fullToken];
-  saveDB();
-  
-  console.log('[Auth] Wachtwoord gereset voor:', user.email);
-  res.json({ success: true });
-});
-
-// Wachtwoord vergeten
-app.post('/auth/forgot-password', async (req, res) => {
-  const { email } = req.body;
-  const user = db.users.find(u => u.email === email);
-  if (!user) return res.json({ success: true }); // Niet verklappen of email bestaat
-
-  const resetToken = require('crypto').randomBytes(32).toString('hex');
-  db.resetTokens[resetToken] = { userId: user.id, expiry: Date.now() + 3600000 }; // 1 uur geldig
-  saveDB();
-
-  try {
-    await resend.emails.send({
-      from: 'CKTech <onboarding@resend.dev>',
-      to: email,
-      subject: 'Wachtwoord resetten - CKTech',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto;">
-          <h1 style="color: #FF6B35;">CKTech®</h1>
-          <h2>Wachtwoord resetten</h2>
-          <p>Hoi ${user.name},</p>
-          <p>Je hebt een wachtwoord reset aangevraagd. Gebruik de code hieronder in de app:</p>
-          <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
-            <h1 style="color: #FF6B35; letter-spacing: 8px; font-size: 32px;">${resetToken.substring(0, 6).toUpperCase()}</h1>
-          </div>
-          <p>Deze code is 1 uur geldig.</p>
-          <p>Als je dit niet hebt aangevraagd, kun je deze email negeren.</p>
-          <p>Met vriendelijke groet,<br>CKTech Team</p>
-        </div>
-      `
-    });
-    console.log('[Auth] Reset email verstuurd naar:', email);
-    res.json({ success: true });
-  } catch(e) {
-    console.error('[Auth] Email fout:', e.message);
-    res.status(500).json({ error: 'Email versturen mislukt' });
-  }
-});
-
-// Wachtwoord resetten
-app.post('/auth/reset-password', async (req, res) => {
-  const { code, newPassword } = req.body;
-  if (!code || !newPassword) return res.status(400).json({ error: 'Code en nieuw wachtwoord zijn verplicht' });
-  
-  const fullToken = Object.keys(db.resetTokens).find(t => t.substring(0, 6).toUpperCase() === code.toUpperCase());
-  if (!fullToken) return res.status(400).json({ error: 'Ongeldige code' });
-  
-  const resetData = db.resetTokens[fullToken];
-  if (resetData.expiry < Date.now()) {
-    delete db.resetTokens[fullToken];
-    saveDB();
-    return res.status(400).json({ error: 'Code verlopen, vraag een nieuwe aan' });
-  }
-  
-  const user = db.users.find(u => u.id === resetData.userId);
-  if (!user) return res.status(400).json({ error: 'Gebruiker niet gevonden' });
-  
-  user.password = await bcrypt.hash(newPassword, 10);
-  delete db.resetTokens[fullToken];
-  saveDB();
-  
-  console.log('[Auth] Wachtwoord gereset voor:', user.email);
-  res.json({ success: true });
-});
-
-// Health
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', users: db.users.length, version: '2.0.0' });
+  res.json({ status: 'ok', version: '3.0.0', db: 'postgresql' });
 });
 
-// ── POLLING ───────────────────────────────────────────────────────────────────
 async function syncAllUsers() {
-  const usersWithBol = db.users.filter(u => u.bolClientId && u.bolClientSecret);
-  console.log('[Poll] Checken voor', usersWithBol.length, 'gebruikers...');
-  for (const user of usersWithBol) {
-    await syncOrdersForUser(user);
-  }
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE bol_client_id IS NOT NULL');
+    console.log('[Poll] Checken voor', result.rows.length, 'gebruikers...');
+    for (const user of result.rows) {
+      user.push_tokens = user.push_tokens || [];
+      user.inventory = user.inventory || [];
+      user.orders_cache = user.orders_cache || {};
+      user.known_order_ids = user.known_order_ids || [];
+      await syncOrdersForUser(user);
+    }
+  } catch(e) { console.error('[Poll] Fout:', e.message); }
 }
 
-loadDB();
-app.listen(CONFIG.PORT, () => console.log('🚀 CKTech Server v2.0 draait op poort', CONFIG.PORT));
-cron.schedule('*/5 * * * *', syncAllUsers);
-setTimeout(syncAllUsers, 3000);
-// Thu May 14 20:31:01 CEST 2026
-// Thu May 14 20:40:43 CEST 2026
-// Thu May 14 23:43:09 CEST 2026
+initDB().then(() => {
+  app.listen(CONFIG.PORT, () => console.log('CKTech Server v3.0 draait op poort', CONFIG.PORT));
+  cron.schedule('*/5 * * * *', syncAllUsers);
+  setTimeout(syncAllUsers, 3000);
+});
