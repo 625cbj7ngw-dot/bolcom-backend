@@ -4,6 +4,8 @@ const cron = require('node-cron');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
 app.use(express.json());
@@ -15,7 +17,7 @@ const CONFIG = {
 
 // ── In-memory database (later PostgreSQL) ─────────────────────────────────────
 const DB_FILE = '/tmp/cktech_db.json';
-let db = { users: [], sessions: {} };
+let db = { users: [], sessions: {}, resetTokens: {} };
 
 function loadDB() {
   try {
@@ -243,6 +245,70 @@ app.post('/inventory-items', authMiddleware, (req, res) => {
   if (!Array.isArray(items)) return res.status(400).json({ error: 'items moet een array zijn' });
   req.user.inventory = items;
   saveDB();
+  res.json({ success: true });
+});
+
+// Wachtwoord vergeten
+app.post('/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  const user = db.users.find(u => u.email === email);
+  if (!user) return res.json({ success: true }); // Niet verklappen of email bestaat
+
+  const resetToken = require('crypto').randomBytes(32).toString('hex');
+  db.resetTokens[resetToken] = { userId: user.id, expiry: Date.now() + 3600000 }; // 1 uur geldig
+  saveDB();
+
+  try {
+    await resend.emails.send({
+      from: 'CKTech <onboarding@resend.dev>',
+      to: email,
+      subject: 'Wachtwoord resetten - CKTech',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto;">
+          <h1 style="color: #FF6B35;">CKTech®</h1>
+          <h2>Wachtwoord resetten</h2>
+          <p>Hoi ${user.name},</p>
+          <p>Je hebt een wachtwoord reset aangevraagd. Gebruik de code hieronder in de app:</p>
+          <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+            <h1 style="color: #FF6B35; letter-spacing: 8px; font-size: 32px;">${resetToken.substring(0, 6).toUpperCase()}</h1>
+          </div>
+          <p>Deze code is 1 uur geldig.</p>
+          <p>Als je dit niet hebt aangevraagd, kun je deze email negeren.</p>
+          <p>Met vriendelijke groet,<br>CKTech Team</p>
+        </div>
+      `
+    });
+    console.log('[Auth] Reset email verstuurd naar:', email);
+    res.json({ success: true });
+  } catch(e) {
+    console.error('[Auth] Email fout:', e.message);
+    res.status(500).json({ error: 'Email versturen mislukt' });
+  }
+});
+
+// Wachtwoord resetten
+app.post('/auth/reset-password', async (req, res) => {
+  const { code, newPassword } = req.body;
+  if (!code || !newPassword) return res.status(400).json({ error: 'Code en nieuw wachtwoord zijn verplicht' });
+  
+  const fullToken = Object.keys(db.resetTokens).find(t => t.substring(0, 6).toUpperCase() === code.toUpperCase());
+  if (!fullToken) return res.status(400).json({ error: 'Ongeldige code' });
+  
+  const resetData = db.resetTokens[fullToken];
+  if (resetData.expiry < Date.now()) {
+    delete db.resetTokens[fullToken];
+    saveDB();
+    return res.status(400).json({ error: 'Code verlopen, vraag een nieuwe aan' });
+  }
+  
+  const user = db.users.find(u => u.id === resetData.userId);
+  if (!user) return res.status(400).json({ error: 'Gebruiker niet gevonden' });
+  
+  user.password = await bcrypt.hash(newPassword, 10);
+  delete db.resetTokens[fullToken];
+  saveDB();
+  
+  console.log('[Auth] Wachtwoord gereset voor:', user.email);
   res.json({ success: true });
 });
 
