@@ -13,31 +13,21 @@ async function getBolToken() {
   tokenExpiry = Date.now() + (res.data.expires_in - 60) * 1000;
   return accessToken;
 }
-async function fetchAllOrders() {
+async function fetchOrdersByStatus(status) {
   const token = await getBolToken();
-  const oneMonthAgo = new Date();
-  oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
   let allOrders = [];
-  let page = 1;
-  while (page <= 10) {
+  for (let page = 1; page <= 5; page++) {
     try {
       const res = await axios.get('https://api.bol.com/retailer/orders', {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.retailer.v10+json' },
-        params: { status: 'ALL', page }
+        params: { status, page }
       });
       const orders = res.data.orders || [];
       if (orders.length === 0) break;
-      const recentOrders = orders.filter(o => {
-        if (!o.orderPlacedDateTime) return true;
-        return new Date(o.orderPlacedDateTime) >= oneMonthAgo;
-      });
-      allOrders = [...allOrders, ...recentOrders];
-      if (recentOrders.length < orders.length) break;
-      page++;
+      allOrders = [...allOrders, ...orders];
     } catch(e) { break; }
   }
-  const seen = new Set();
-  return allOrders.filter(o => { if (seen.has(o.orderId)) return false; seen.add(o.orderId); return true; });
+  return allOrders;
 }
 async function fetchOrderDetail(orderId) {
   const token = await getBolToken();
@@ -50,9 +40,7 @@ async function sendPush(title, body, data) {
 }
 async function checkNewOrders() {
   try {
-    const token = await getBolToken();
-    const res = await axios.get('https://api.bol.com/retailer/orders', { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.retailer.v10+json' }, params: { status: 'OPEN', page: 1 } });
-    const orders = res.data.orders || [];
+    const orders = await fetchOrdersByStatus('OPEN');
     if (isFirstRun) { orders.forEach(o => knownOrderIds.add(o.orderId)); isFirstRun = false; return; }
     for (const order of orders.filter(o => !knownOrderIds.has(o.orderId))) {
       knownOrderIds.add(order.orderId);
@@ -67,9 +55,13 @@ async function checkNewOrders() {
 app.post('/register-token', (req, res) => { pushTokens.add(req.body.token); res.json({ success: true }); });
 app.get('/orders', async (req, res) => {
   try {
-    const orders = await fetchAllOrders();
-    console.log('[Orders] Opgehaald:', orders.length, 'van afgelopen maand');
-    const detailed = await Promise.allSettled(orders.slice(0, 50).map(o => fetchOrderDetail(o.orderId)));
+    const statuses = ['OPEN', 'SHIPPED', 'ALL'];
+    const results = await Promise.allSettled(statuses.map(s => fetchOrdersByStatus(s)));
+    const combined = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+    const seen = new Set();
+    const unique = combined.filter(o => { if (seen.has(o.orderId)) return false; seen.add(o.orderId); return true; });
+    console.log('[Orders] Uniek opgehaald:', unique.length);
+    const detailed = await Promise.allSettled(unique.slice(0, 50).map(o => fetchOrderDetail(o.orderId)));
     res.json({ orders: detailed.filter(r => r.status === 'fulfilled').map(r => r.value) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
