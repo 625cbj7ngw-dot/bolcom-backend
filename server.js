@@ -367,6 +367,35 @@ async function sendDailySummary() {
   } catch(e) { console.error('[Daily] Fout:', e.message); }
 }
 
+
+async function sendWeeklyReport() {
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE bol_client_id IS NOT NULL');
+    const now = new Date();
+    const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+    for (const user of result.rows) {
+      const ordersCache = user.orders_cache || {};
+      const weekOrders = Object.values(ordersCache).filter(o => {
+        if (!o.orderPlacedDateTime) return false;
+        return new Date(o.orderPlacedDateTime) >= weekAgo;
+      });
+
+      const revenue = weekOrders.reduce((sum, o) => sum + (o.orderItems?.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0) || 0), 0);
+      const commission = weekOrders.reduce((sum, o) => sum + (o.orderItems?.reduce((s, i) => s + (i.commission || 0), 0) || 0), 0);
+      const count = weekOrders.length;
+      const tokens = user.push_tokens || [];
+
+      await sendPush(tokens,
+        '📊 Weekrapport CKTech',
+        count + ' bestelling' + (count > 1 ? 'en' : '') + ' · €' + revenue.toFixed(2) + ' omzet · €' + (revenue - commission).toFixed(2) + ' netto',
+        { type: 'weekly_report' }
+      );
+      console.log('[Weekly] Rapport verstuurd naar:', user.email);
+    }
+  } catch(e) { console.error('[Weekly] Fout:', e.message); }
+}
+
 async function syncAllUsers() {
   try {
     const result = await pool.query('SELECT * FROM users WHERE bol_client_id IS NOT NULL');
@@ -385,7 +414,8 @@ async function syncAllUsers() {
 initDB().then(() => {
   app.listen(CONFIG.PORT, () => console.log('CKTech Server v3.0 draait op poort', CONFIG.PORT));
   cron.schedule('*/5 * * * *', syncAllUsers);
-cron.schedule('0 20 * * *', sendDailySummary); // Elke dag om 20:00
+cron.schedule('0 20 * * *', sendDailySummary);
+cron.schedule('0 9 * * 1', sendWeeklyReport); // Elke maandag om 09:00 // Elke dag om 20:00
   setTimeout(syncAllUsers, 3000);
 });
 // Force add column if not exists
