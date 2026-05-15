@@ -36,6 +36,7 @@ async function initDB() {
       orders_cache JSONB DEFAULT '{}',
       known_order_ids JSONB DEFAULT '[]',
       first_run BOOLEAN DEFAULT false,
+      low_stock_threshold INTEGER DEFAULT 3,
       created_at TIMESTAMP DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS reset_tokens (
@@ -308,6 +309,18 @@ app.post('/inventory-items', authMiddleware, async (req, res) => {
   req.user.inventory = items;
   await saveUser(req.user);
   res.json({ success: true });
+});
+
+app.post('/settings/threshold', authMiddleware, async (req, res) => {
+  const { threshold } = req.body;
+  if (!threshold || threshold < 1) return res.status(400).json({ error: 'Ongeldige drempel' });
+  await pool.query('UPDATE users SET low_stock_threshold = $1 WHERE id = $2', [threshold, req.user.id]);
+  res.json({ success: true });
+});
+
+app.get('/settings/threshold', authMiddleware, async (req, res) => {
+  const result = await pool.query('SELECT low_stock_threshold FROM users WHERE id = $1', [req.user.id]);
+  res.json({ threshold: result.rows[0]?.low_stock_threshold || 3 });
 });
 
 app.delete('/auth/account', authMiddleware, async (req, res) => {
