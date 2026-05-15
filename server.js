@@ -310,6 +310,15 @@ app.post('/inventory-items', authMiddleware, async (req, res) => {
   res.json({ success: true });
 });
 
+app.delete('/auth/account', authMiddleware, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM reset_tokens WHERE user_id = $1', [req.user.id]);
+    await pool.query('DELETE FROM users WHERE id = $1', [req.user.id]);
+    console.log('[Auth] Account verwijderd:', req.user.email);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '3.0.0', db: 'postgresql' });
 });
