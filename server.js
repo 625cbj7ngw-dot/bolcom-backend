@@ -323,6 +323,31 @@ app.get('/settings/threshold', authMiddleware, async (req, res) => {
   res.json({ threshold: result.rows[0]?.low_stock_threshold || 3 });
 });
 
+app.post('/orders/:orderId/ship', authMiddleware, async (req, res) => {
+  const { orderId } = req.params;
+  const { orderItemId, trackingCode, transporterCode } = req.body;
+  if (!req.user.bol_client_id) return res.status(400).json({ error: 'Geen bol.com credentials' });
+  try {
+    const token = await getBolToken(req.user);
+    await axios.put(`https://api.bol.com/retailer/orders/${orderId}/shipment`, {
+      orderItems: [{ orderItemId, quantity: 1 }],
+      shipmentReference: trackingCode,
+      transport: { trackingCode, transporterCode: transporterCode || 'TNT' }
+    }, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.retailer.v10+json', 'Content-Type': 'application/vnd.retailer.v10+json' }
+    });
+    if (req.user.orders_cache && req.user.orders_cache[orderId]) {
+      req.user.orders_cache[orderId].status = 'SHIPPED';
+      await saveUser(req.user);
+    }
+    console.log('[Ship] Bestelling', orderId, 'als verzonden gemarkeerd');
+    res.json({ success: true });
+  } catch(e) {
+    console.error('[Ship] Fout:', e.response?.data || e.message);
+    res.status(500).json({ error: e.response?.data?.detail || e.message });
+  }
+});
+
 app.delete('/auth/account', authMiddleware, async (req, res) => {
   try {
     await pool.query('DELETE FROM reset_tokens WHERE user_id = $1', [req.user.id]);
