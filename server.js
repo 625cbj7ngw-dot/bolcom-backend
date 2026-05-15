@@ -225,7 +225,7 @@ app.post('/auth/login', async (req, res) => {
 
 app.get('/auth/me', authMiddleware, (req, res) => {
   const u = req.user;
-  res.json({ id: u.id, email: u.email, name: u.name, storeName: u.store_name, hasBolCredentials: !!(u.bol_client_id && u.bol_client_secret) });
+  res.json({ id: u.id, email: u.email, name: u.name, storeName: u.store_name, hasBolCredentials: !!(u.bol_client_id && u.bol_client_secret), bolClientId: u.bol_client_id || "", bolClientSecret: u.bol_client_secret || "" });
 });
 
 app.post('/auth/bol-credentials', authMiddleware, async (req, res) => {
