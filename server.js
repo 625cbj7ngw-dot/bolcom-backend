@@ -388,3 +388,5 @@ initDB().then(() => {
 cron.schedule('0 20 * * *', sendDailySummary); // Elke dag om 20:00
   setTimeout(syncAllUsers, 3000);
 });
+// Force add column if not exists
+pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS low_stock_threshold INTEGER DEFAULT 3").catch(() => {});
