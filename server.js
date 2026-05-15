@@ -314,6 +314,37 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '3.0.0', db: 'postgresql' });
 });
 
+
+async function sendDailySummary() {
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE bol_client_id IS NOT NULL');
+    const today = new Date();
+    today.setHours(0,0,0,0);
+
+    for (const user of result.rows) {
+      const ordersCache = user.orders_cache || {};
+      const todayOrders = Object.values(ordersCache).filter(o => {
+        if (!o.orderPlacedDateTime) return false;
+        return new Date(o.orderPlacedDateTime) >= today;
+      });
+
+      const revenue = todayOrders.reduce((sum, o) => sum + (o.orderItems?.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0) || 0), 0);
+      const commission = todayOrders.reduce((sum, o) => sum + (o.orderItems?.reduce((s, i) => s + (i.commission || 0), 0) || 0), 0);
+      const count = todayOrders.length;
+
+      if (count > 0) {
+        const tokens = user.push_tokens || [];
+        await sendPush(tokens,
+          '📊 Dagelijks rapport - ' + today.toLocaleDateString('nl-NL', { day: 'numeric', month: 'short' }),
+          count + ' bestelling' + (count > 1 ? 'en' : '') + ' · €' + revenue.toFixed(2) + ' omzet · €' + commission.toFixed(2) + ' commissie',
+          { type: 'daily_summary' }
+        );
+        console.log('[Daily] Rapport verstuurd naar:', user.email, '- €' + revenue.toFixed(2));
+      }
+    }
+  } catch(e) { console.error('[Daily] Fout:', e.message); }
+}
+
 async function syncAllUsers() {
   try {
     const result = await pool.query('SELECT * FROM users WHERE bol_client_id IS NOT NULL');
@@ -332,5 +363,6 @@ async function syncAllUsers() {
 initDB().then(() => {
   app.listen(CONFIG.PORT, () => console.log('CKTech Server v3.0 draait op poort', CONFIG.PORT));
   cron.schedule('*/5 * * * *', syncAllUsers);
+cron.schedule('0 20 * * *', sendDailySummary); // Elke dag om 20:00
   setTimeout(syncAllUsers, 3000);
 });
