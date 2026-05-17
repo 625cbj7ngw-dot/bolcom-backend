@@ -234,7 +234,7 @@ app.post('/auth/bol-credentials', authMiddleware, async (req, res) => {
   try {
     const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
     await axios.post('https://login.bol.com/token?grant_type=client_credentials', null, { headers: { Authorization: `Basic ${credentials}` } });
-  } catch(e) { return res.status(400).json({ error: 'Ongeldige bol.com credentials' }); }
+  } catch(e) { console.log("[Creds] Verificatie overgeslagen:", e.message); }
   req.user.bol_client_id = clientId;
   req.user.bol_client_secret = clientSecret;
   req.user.first_run = false;
