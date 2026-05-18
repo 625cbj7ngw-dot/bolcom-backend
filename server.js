@@ -424,6 +424,62 @@ Geef korte, persoonlijke en praktische antwoorden in het Nederlands. Gebruik emo
   }
 });
 
+app.get('/ai/predictions', authMiddleware, async (req, res) => {
+  try {
+    const user = req.user;
+    const ordersCache = user.orders_cache || {};
+    const orders = Object.values(ordersCache);
+    const inventory = user.inventory || [];
+
+    const predictions = inventory.map(product => {
+      if (!product.ean && !product.name) return null;
+      
+      // Bereken verkopen per dag op basis van bestellingen
+      const productOrders = orders.filter(o => 
+        o.orderItems?.some(i => i.product?.ean === product.ean || i.product?.title?.includes(product.name))
+      );
+      
+      // Verkopen per dag (laatste 30 dagen)
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      const recentOrders = productOrders.filter(o => new Date(o.orderPlacedDateTime) >= thirtyDaysAgo);
+      const totalSold = recentOrders.reduce((sum, o) => {
+        return sum + (o.orderItems?.filter(i => i.product?.ean === product.ean || i.product?.title?.includes(product.name))
+          .reduce((s, i) => s + (i.quantity || 1), 0) || 0);
+      }, 0);
+      
+      const salesPerDay = totalSold / 30;
+      const daysUntilEmpty = salesPerDay > 0 ? Math.floor(product.stock / salesPerDay) : 999;
+      const recommendedOrder = Math.ceil(salesPerDay * 30); // 30 dagen voorraad
+      
+      let status = 'good';
+      if (daysUntilEmpty <= 3) status = 'critical';
+      else if (daysUntilEmpty <= 7) status = 'warning';
+      else if (daysUntilEmpty <= 14) status = 'attention';
+
+      return {
+        name: product.name,
+        ean: product.ean,
+        currentStock: product.stock,
+        salesPerDay: Math.round(salesPerDay * 10) / 10,
+        daysUntilEmpty,
+        recommendedOrder,
+        status,
+        totalSold30Days: totalSold,
+        price: product.price,
+        costPrice: product.costPrice || 0,
+      };
+    }).filter(Boolean);
+
+    predictions.sort((a, b) => a.daysUntilEmpty - b.daysUntilEmpty);
+
+    res.json({ predictions });
+  } catch(e) {
+    console.error('[Predictions] Fout:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '3.0.0', db: 'postgresql' });
 });
