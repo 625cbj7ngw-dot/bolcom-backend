@@ -5,6 +5,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Resend } = require('resend');
 const { Pool } = require('pg');
+const Anthropic = require('@anthropic-ai/sdk');
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const app = express();
 app.use(express.json());
@@ -355,6 +357,61 @@ app.delete('/auth/account', authMiddleware, async (req, res) => {
     console.log('[Auth] Account verwijderd:', req.user.email);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/ai/chat', authMiddleware, async (req, res) => {
+  const { message } = req.body;
+  if (!message) return res.status(400).json({ error: 'Bericht is verplicht' });
+
+  try {
+    const user = req.user;
+    const ordersCache = user.orders_cache || {};
+    const orders = Object.values(ordersCache);
+    const inventory = user.inventory || [];
+
+    const totalRevenue = orders.reduce((sum, o) => sum + (o.orderItems?.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0) || 0), 0);
+    const totalOrders = orders.length;
+    const openOrders = orders.filter(o => o.status === 'OPEN').length;
+    const lowStock = inventory.filter(i => i.stock <= 3);
+    
+    const now = new Date();
+    const thisMonth = orders.filter(o => {
+      if (!o.orderPlacedDateTime) return false;
+      const d = new Date(o.orderPlacedDateTime);
+      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    });
+    const thisRevenue = thisMonth.reduce((sum, o) => sum + (o.orderItems?.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0) || 0), 0);
+
+    const context = `
+Je bent een persoonlijke AI verkoop assistent voor ${user.name}, eigenaar van ${user.store_name || 'een bol.com winkel'}.
+
+ACTUELE BUSINESS DATA:
+- Totale omzet: €${totalRevenue.toFixed(2)}
+- Totaal bestellingen: ${totalOrders}
+- Open bestellingen: ${openOrders}
+- Omzet deze maand: €${thisRevenue.toFixed(2)}
+- Bestellingen deze maand: ${thisMonth.length}
+- Producten in voorraad: ${inventory.length}
+- Lage voorraad producten: ${lowStock.map(i => i.name + ' (' + i.stock + ' stuks)').join(', ') || 'geen'}
+
+VOORRAAD:
+${inventory.map(i => `- ${i.name}: ${i.stock} stuks, prijs €${i.price}, inkoopprijs €${i.costPrice || 0}`).join('\n')}
+
+Geef korte, persoonlijke en praktische antwoorden in het Nederlands. Gebruik emoji's. Max 3-4 zinnen tenzij anders gevraagd.
+    `;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      system: context,
+      messages: [{ role: 'user', content: message }]
+    });
+
+    res.json({ response: response.content[0].text });
+  } catch(e) {
+    console.error('[AI] Fout:', e.message);
+    res.status(500).json({ error: 'AI fout: ' + e.message });
+  }
 });
 
 app.get('/health', (req, res) => {
