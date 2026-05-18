@@ -397,7 +397,14 @@ ACTUELE BUSINESS DATA:
 VOORRAAD:
 ${inventory.map(i => `- ${i.name}: ${i.stock} stuks, prijs €${i.price}, inkoopprijs €${i.costPrice || 0}`).join('\n')}
 
-Geef korte, persoonlijke en praktische antwoorden in het Nederlands. Gebruik emoji's. Max 3-4 zinnen tenzij anders gevraagd.
+Je kunt ook helpen met:
+- Prijsberekeningen: als iemand een inkoopprijs geeft, bereken dan de ideale verkoopprijs rekening houdend met bol.com commissie (gemiddeld 10%, varieert per categorie) en gewenste marge.
+- Formule: Verkoopprijs = Inkoopprijs / (1 - commissie% - gewenste marge%)
+- Geef altijd een breakdown: inkoopprijs, commissie bedrag, winst bedrag, verkoopprijs
+- Inkoop advies: op basis van verkoopsnelheid adviseer wanneer bij te bestellen
+- Marge analyse: bereken huidige marges op basis van voorraaddata
+
+Geef korte, persoonlijke en praktische antwoorden in het Nederlands. Gebruik emoji's. Max 3-4 zinnen tenzij anders gevraagd. Bij prijsberekeningen geef altijd een duidelijke tabel.
     `;
 
     const response = await anthropic.messages.create({
