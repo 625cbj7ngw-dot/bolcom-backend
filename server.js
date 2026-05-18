@@ -401,7 +401,7 @@ Geef korte, persoonlijke en praktische antwoorden in het Nederlands. Gebruik emo
     `;
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-5',
       max_tokens: 1000,
       system: context,
       messages: [{ role: 'user', content: message }]
