@@ -360,7 +360,7 @@ app.delete('/auth/account', authMiddleware, async (req, res) => {
 });
 
 app.post('/ai/chat', authMiddleware, async (req, res) => {
-  const { message } = req.body;
+  const { message, history } = req.body;
   if (!message) return res.status(400).json({ error: 'Bericht is verplicht' });
 
   try {
@@ -411,7 +411,10 @@ Geef korte, persoonlijke en praktische antwoorden in het Nederlands. Gebruik emo
       model: 'claude-sonnet-4-5',
       max_tokens: 1000,
       system: context,
-      messages: [{ role: 'user', content: message }]
+      messages: [
+      ...(history || []).map(h => ({ role: h.role === 'assistant' ? 'assistant' : 'user', content: h.text })),
+      { role: 'user', content: message }
+    ]
     });
 
     res.json({ response: response.content[0].text });
