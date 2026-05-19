@@ -567,6 +567,65 @@ Schrijf in het Nederlands, persoonlijk en direct. Gebruik emoji's. Wees specifie
   }
 });
 
+app.get('/ai/competitor-radar', authMiddleware, async (req, res) => {
+  const { query } = req.query;
+  if (!query) return res.status(400).json({ error: 'Zoekterm vereist' });
+  
+  try {
+    const token = await getBolToken(req.user);
+    
+    // Zoek producten op bol.com
+    const searchRes = await axios.get('https://api.bol.com/retailer/products', {
+      headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.retailer.v10+json' },
+      params: { searchTerm: query, page: 1 }
+    });
+
+    const products = searchRes.data.products || [];
+    
+    // Haal aanbieders op voor elk product
+    const results = await Promise.all(products.slice(0, 5).map(async product => {
+      try {
+        const offersRes = await axios.get('https://api.bol.com/retailer/products/' + product.ean + '/offers', {
+          headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.retailer.v10+json' },
+          params: { condition: 'NEW' }
+        });
+        const offers = offersRes.data.offers || [];
+        const prices = offers.map(o => o.pricing?.bundlePrices?.[0]?.unitPrice).filter(Boolean);
+        const lowestPrice = prices.length > 0 ? Math.min(...prices) : null;
+        const highestPrice = prices.length > 0 ? Math.max(...prices) : null;
+        
+        return {
+          ean: product.ean,
+          title: product.title,
+          offerCount: offers.length,
+          lowestPrice,
+          highestPrice,
+          avgPrice: prices.length > 0 ? prices.reduce((a,b) => a+b, 0) / prices.length : null,
+        };
+      } catch(e) { return null; }
+    }));
+
+    // AI analyse
+    const validResults = results.filter(Boolean);
+    const userInventory = req.user.inventory || [];
+    
+    const context = 'Analyseer deze concurrentie data voor bol.com verkoper ' + req.user.name + ' die zoekt op "' + query + '":\n\n' +
+      validResults.map(r => r.title + ': ' + r.offerCount + ' aanbieders, laagste prijs €' + r.lowestPrice?.toFixed(2) + ', hoogste €' + r.highestPrice?.toFixed(2)).join('\n') +
+      '\n\nGeef een korte analyse in het Nederlands: wie heeft de beste kansen, wat is een goede instapprijs, en is dit een interessant product om te verkopen? Max 3 zinnen per product.';
+
+    const aiRes = await anthropic.messages.create({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 800,
+      messages: [{ role: 'user', content: context }]
+    });
+
+    res.json({ results: validResults, analysis: aiRes.content[0].text });
+  } catch(e) {
+    console.error('[Radar] Fout:', e.response?.data || e.message);
+    res.status(500).json({ error: e.response?.data?.detail || e.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '3.0.0', db: 'postgresql' });
 });
