@@ -567,50 +567,51 @@ Schrijf in het Nederlands, persoonlijk en direct. Gebruik emoji's. Wees specifie
   }
 });
 
-app.get('/ai/competitor-radar', authMiddleware, async (req, res) => {
-  const { query } = req.query;
-  if (!query) return res.status(400).json({ error: 'Zoekterm vereist' });
-  
+app.post('/ai/price-optimizer', authMiddleware, async (req, res) => {
+  const { costPrice, category, targetMargin, competitorPrices } = req.body;
+  if (!costPrice) return res.status(400).json({ error: 'Inkoopprijs is verplicht' });
+
   try {
-    const token = await getBolToken(req.user);
-    
-    // Gebruik eigen aanbiedingen als basis voor concurrentie analyse
-    const offersRes = await axios.get('https://api.bol.com/retailer/offers', {
-      headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.retailer.v10+json' },
-      params: { page: 1 }
-    });
+    const context = `Je bent een bol.com pricing expert. Bereken de optimale verkoopprijs voor een Nederlandse bol.com verkoper.
 
-    // Zoek via AI wat de marktprijzen zijn
-    const aiSearchRes = await anthropic.messages.create({
+GEGEVENS:
+- Inkoopprijs: €${costPrice}
+- Categorie: ${category || 'algemeen'}
+- Gewenste marge: ${targetMargin || 30}%
+- Concurrentprijzen die verkoper heeft gezien: ${competitorPrices || 'niet opgegeven'}
+
+Bereken en geef:
+1. Aanbevolen verkoopprijs
+2. Geschatte bol.com commissie (gebaseerd op categorie, gemiddeld 8-15%)
+3. Netto winst per verkoop
+4. Break-even prijs
+5. Advies over prijsstrategie
+
+Geef antwoord in JSON format:
+{
+  "recommendedPrice": 19.99,
+  "commission": 2.40,
+  "commissionPercentage": 12,
+  "netProfit": 4.50,
+  "breakEvenPrice": 14.20,
+  "margin": 22.5,
+  "advice": "tekst",
+  "priceRange": { "min": 17.99, "max": 22.99 }
+}
+Respond ONLY with JSON, no other text.`;
+
+    const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
-      max_tokens: 500,
-      messages: [{ role: 'user', content: 'Geef me fictieve maar realistische concurrentie data voor bol.com voor het product: "' + query + '". Geef 3-5 producten met EAN (verzin een), titel, aantal aanbieders (1-50), laagste prijs en hoogste prijs. Respond ONLY in JSON array format: [{"ean":"...","title":"...","offerCount":5,"lowestPrice":9.99,"highestPrice":24.99}]' }]
-    });
-
-    let results = [];
-    try {
-      const jsonText = aiSearchRes.content[0].text.replace(/```json|```/g, '').trim();
-      results = JSON.parse(jsonText);
-    } catch(e) { results = []; }
-
-    // AI analyse
-    const validResults = results.filter(Boolean);
-    const userInventory = req.user.inventory || [];
-    
-    const context = 'Analyseer deze concurrentie data voor bol.com verkoper ' + req.user.name + ' die zoekt op "' + query + '":\n\n' +
-      validResults.map(r => r.title + ': ' + r.offerCount + ' aanbieders, laagste prijs €' + r.lowestPrice?.toFixed(2) + ', hoogste €' + r.highestPrice?.toFixed(2)).join('\n') +
-      '\n\nGeef een korte analyse in het Nederlands: wie heeft de beste kansen, wat is een goede instapprijs, en is dit een interessant product om te verkopen? Max 3 zinnen per product.';
-
-    const aiRes = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 800,
+      max_tokens: 600,
       messages: [{ role: 'user', content: context }]
     });
 
-    res.json({ results: validResults, analysis: aiRes.content[0].text });
+    const jsonText = response.content[0].text.replace(/```json|```/g, '').trim();
+    const result = JSON.parse(jsonText);
+    res.json(result);
   } catch(e) {
-    console.error('[Radar] Fout:', e.response?.data || e.message);
-    res.status(500).json({ error: e.response?.data?.detail || e.message });
+    console.error('[PriceOptimizer] Fout:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
