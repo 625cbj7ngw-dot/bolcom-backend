@@ -5,6 +5,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Resend } = require('resend');
 const { Pool } = require('pg');
+const Stripe = require('stripe');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const Anthropic = require('@anthropic-ai/sdk');
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -39,6 +41,9 @@ async function initDB() {
       known_order_ids JSONB DEFAULT '[]',
       first_run BOOLEAN DEFAULT false,
       low_stock_threshold INTEGER DEFAULT 3,
+      subscription_status TEXT DEFAULT 'trial',
+      trial_ends_at BIGINT DEFAULT 0,
+      stripe_customer_id TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS reset_tokens (
@@ -63,12 +68,13 @@ async function getUserByEmail(email) {
 
 async function saveUser(user) {
   await pool.query(`
-    INSERT INTO users (id, email, password, name, store_name, bol_client_id, bol_client_secret, push_tokens, inventory, orders_cache, known_order_ids, first_run)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    INSERT INTO users (id, email, password, name, store_name, bol_client_id, bol_client_secret, push_tokens, inventory, orders_cache, known_order_ids, first_run, subscription_status, trial_ends_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
     ON CONFLICT (id) DO UPDATE SET
       email = $2, password = $3, name = $4, store_name = $5,
       bol_client_id = $6, bol_client_secret = $7, push_tokens = $8,
-      inventory = $9, orders_cache = $10, known_order_ids = $11, first_run = $12
+      inventory = $9, orders_cache = $10, known_order_ids = $11, first_run = $12,
+      subscription_status = $13, trial_ends_at = $14
   `, [
     user.id, user.email, user.password, user.name, user.store_name,
     user.bol_client_id, user.bol_client_secret,
@@ -76,7 +82,9 @@ async function saveUser(user) {
     JSON.stringify(user.inventory || []),
     JSON.stringify(user.orders_cache || {}),
     JSON.stringify(user.known_order_ids || []),
-    user.first_run || false
+    user.first_run || false,
+    user.subscription_status || 'trial',
+    user.trial_ends_at || (Date.now() + 14 * 24 * 60 * 60 * 1000)
   ]);
 }
 
@@ -207,6 +215,7 @@ app.post('/auth/register', async (req, res) => {
   if (!email || !password || !name) return res.status(400).json({ error: 'Email, wachtwoord en naam zijn verplicht' });
   if (await getUserByEmail(email)) return res.status(400).json({ error: 'Email al in gebruik' });
   const hashedPassword = await bcrypt.hash(password, 10);
+  const trialEndsAt = Date.now() + (14 * 24 * 60 * 60 * 1000);
   const user = { id: Date.now().toString(), email, password: hashedPassword, name, store_name: storeName || name, bol_client_id: null, bol_client_secret: null, push_tokens: [], inventory: [], orders_cache: {}, known_order_ids: [], first_run: false };
   await saveUser(user);
   const token = jwt.sign({ userId: user.id }, CONFIG.JWT_SECRET, { expiresIn: '30d' });
@@ -612,6 +621,85 @@ Respond ONLY with JSON, no other text.`;
   } catch(e) {
     console.error('[PriceOptimizer] Fout:', e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/subscription/status', authMiddleware, async (req, res) => {
+  const user = req.user;
+  const now = Date.now();
+  const trialEndsAt = user.trial_ends_at || 0;
+  const status = user.subscription_status || 'trial';
+  const daysLeft = Math.max(0, Math.ceil((trialEndsAt - now) / (24 * 60 * 60 * 1000)));
+  
+  let active = false;
+  if (status === 'active') active = true;
+  else if (status === 'trial' && now < trialEndsAt) active = true;
+  
+  res.json({ status, active, daysLeft, trialEndsAt });
+});
+
+app.post('/subscription/create-checkout', authMiddleware, async (req, res) => {
+  try {
+    const user = req.user;
+    
+    // Create or get Stripe customer
+    let customerId = user.stripe_customer_id;
+    if (!customerId) {
+      const customer = await stripe.customers.create({ email: user.email, name: user.name, metadata: { userId: user.id } });
+      customerId = customer.id;
+      await pool.query('UPDATE users SET stripe_customer_id = $1 WHERE id = $2', [customerId, user.id]);
+    }
+
+    // Create checkout session
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'eur',
+          product_data: { name: 'CKTech Premium', description: 'Onbeperkt toegang tot alle features' },
+          unit_amount: 999,
+          recurring: { interval: 'month' },
+        },
+        quantity: 1,
+      }],
+      mode: 'subscription',
+      success_url: 'https://cktech.nl/success',
+      cancel_url: 'https://cktech.nl/cancel',
+      metadata: { userId: user.id },
+    });
+
+    res.json({ url: session.url, sessionId: session.id });
+  } catch(e) {
+    console.error('[Stripe] Fout:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/subscription/webhook', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  try {
+    const event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET || 'whsec_test');
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const userId = session.metadata?.userId;
+      if (userId) {
+        await pool.query('UPDATE users SET subscription_status = $1 WHERE id = $2', ['active', userId]);
+        console.log('[Stripe] Abonnement geactiveerd voor userId:', userId);
+      }
+    }
+    if (event.type === 'customer.subscription.deleted') {
+      const sub = event.data.object;
+      const customer = await stripe.customers.retrieve(sub.customer);
+      const userId = customer.metadata?.userId;
+      if (userId) {
+        await pool.query('UPDATE users SET subscription_status = $1 WHERE id = $2', ['expired', userId]);
+        console.log('[Stripe] Abonnement verlopen voor userId:', userId);
+      }
+    }
+    res.json({ received: true });
+  } catch(e) {
+    res.status(400).json({ error: e.message });
   }
 });
 
