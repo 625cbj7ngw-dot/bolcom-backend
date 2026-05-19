@@ -480,6 +480,93 @@ app.get('/ai/predictions', authMiddleware, async (req, res) => {
   }
 });
 
+app.get('/ai/dna', authMiddleware, async (req, res) => {
+  try {
+    const user = req.user;
+    const orders = Object.values(user.orders_cache || {});
+    const inventory = user.inventory || [];
+
+    const calcRevenue = (list) => list.reduce((sum, o) => sum + (o.orderItems?.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0) || 0), 0);
+    const calcCommission = (list) => list.reduce((sum, o) => sum + (o.orderItems?.reduce((s, i) => s + (i.commission || 0), 0) || 0), 0);
+
+    // Beste dag analyse
+    const dayStats = [0,1,2,3,4,5,6].map(day => {
+      const dayOrders = orders.filter(o => o.orderPlacedDateTime && new Date(o.orderPlacedDateTime).getDay() === day);
+      return { day, revenue: calcRevenue(dayOrders), count: dayOrders.length };
+    });
+    const bestDay = dayStats.sort((a,b) => b.revenue - a.revenue)[0];
+    const dayNames = ['zondag','maandag','dinsdag','woensdag','donderdag','vrijdag','zaterdag'];
+
+    // Beste uur analyse
+    const hourStats = Array.from({length: 24}, (_, h) => {
+      const hourOrders = orders.filter(o => o.orderPlacedDateTime && new Date(o.orderPlacedDateTime).getHours() === h);
+      return { hour: h, count: hourOrders.length, revenue: calcRevenue(hourOrders) };
+    });
+    const bestHour = hourStats.sort((a,b) => b.revenue - a.revenue)[0];
+
+    // Product analyse
+    const productMap = {};
+    orders.forEach(o => {
+      o.orderItems?.forEach(i => {
+        const key = i.product?.ean || i.product?.title || 'onbekend';
+        if (!productMap[key]) productMap[key] = { title: i.product?.title || 'Onbekend', revenue: 0, commission: 0, count: 0 };
+        productMap[key].revenue += (i.unitPrice * i.quantity) || 0;
+        productMap[key].commission += i.commission || 0;
+        productMap[key].count += i.quantity || 1;
+      });
+    });
+    const products = Object.values(productMap).sort((a,b) => b.revenue - a.revenue);
+    const bestProduct = products[0];
+
+    // Marge analyse per voorraad product
+    const margeAnalyse = inventory.map(p => {
+      const inv = productMap[p.ean] || productMap[p.name];
+      const marge = p.price && p.costPrice ? ((p.price - p.costPrice) / p.price * 100) : null;
+      return { name: p.name, marge, stock: p.stock, price: p.price, costPrice: p.costPrice };
+    }).filter(p => p.marge !== null).sort((a,b) => b.marge - a.marge);
+
+    const totalRevenue = calcRevenue(orders);
+    const totalCommission = calcCommission(orders);
+    const avgMargin = margeAnalyse.length > 0 ? margeAnalyse.reduce((s,p) => s + p.marge, 0) / margeAnalyse.length : 0;
+
+    const context = `
+Je bent een elite business coach voor bol.com verkopers. Analyseer deze data van ${user.name} (${user.store_name}) en geef een persoonlijk Winst DNA rapport.
+
+DATA:
+- Totale omzet: €${totalRevenue.toFixed(2)}
+- Totale commissie: €${totalCommission.toFixed(2)}
+- Totaal bestellingen: ${orders.length}
+- Gemiddelde marge: ${avgMargin.toFixed(1)}%
+- Beste verkoopdag: ${dayNames[bestDay?.day]} (€${bestDay?.revenue.toFixed(2)}, ${bestDay?.count} bestellingen)
+- Beste verkoopuur: ${bestHour?.hour}:00 uur
+- Beste product: ${bestProduct?.title} (€${bestProduct?.revenue.toFixed(2)} omzet)
+- Marge per product: ${margeAnalyse.map(p => p.name + ': ' + p.marge.toFixed(0) + '%').join(', ')}
+
+Geef een Winst DNA rapport met:
+1. 🧬 DNA Samenvatting (2 zinnen over de business)
+2. 💡 3 concrete inzichten die geld opleveren
+3. ⚡ 1 actie die deze week uitgevoerd moet worden
+4. 📈 Groeipotentieel schatting
+
+Schrijf in het Nederlands, persoonlijk en direct. Gebruik emoji's. Wees specifiek met getallen.
+    `;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: context }]
+    });
+
+    res.json({
+      report: response.content[0].text,
+      stats: { bestDay: { day: dayNames[bestDay?.day], revenue: bestDay?.revenue, count: bestDay?.count }, bestHour: bestHour?.hour, bestProduct: bestProduct?.title, avgMargin, totalRevenue, totalCommission, products: products.slice(0,3), margeAnalyse: margeAnalyse.slice(0,3) }
+    });
+  } catch(e) {
+    console.error('[DNA] Fout:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '3.0.0', db: 'postgresql' });
 });
