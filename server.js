@@ -552,7 +552,7 @@ Schrijf in het Nederlands, persoonlijk en direct. Gebruik emoji's. Wees specifie
     `;
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-5',
       max_tokens: 1000,
       messages: [{ role: 'user', content: context }]
     });
