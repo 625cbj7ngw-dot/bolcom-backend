@@ -12,6 +12,13 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const app = express();
 app.use(express.json());
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-admin-key');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
