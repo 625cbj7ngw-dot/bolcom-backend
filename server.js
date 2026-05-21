@@ -703,6 +703,76 @@ app.post('/subscription/webhook', async (req, res) => {
   }
 });
 
+// Admin middleware
+const adminMiddleware = (req, res, next) => {
+  const adminKey = req.headers['x-admin-key'];
+  if (adminKey !== process.env.ADMIN_SECRET_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+};
+
+// Admin endpoints
+app.get('/admin/stats', adminMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, email, name, store_name, subscription_status, trial_ends_at, created_at FROM users ORDER BY created_at DESC');
+    const users = result.rows;
+    const premium = users.filter(u => u.subscription_status === 'active').length;
+    const trial = users.filter(u => u.subscription_status === 'trial').length;
+    const expired = users.filter(u => u.subscription_status === 'expired').length;
+    const mrr = premium * 9.99;
+    res.json({ users, stats: { total: users.length, premium, trial, expired, mrr } });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/admin/set-premium', adminMiddleware, async (req, res) => {
+  try {
+    const { email, active } = req.body;
+    const status = active ? 'active' : 'trial';
+    const future = Date.now() + 30*24*60*60*1000;
+    await pool.query('UPDATE users SET subscription_status = $1, trial_ends_at = $2 WHERE email = $3', [status, future, email]);
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/admin/send-notification', adminMiddleware, async (req, res) => {
+  try {
+    const { title, body } = req.body;
+    const result = await pool.query('SELECT push_tokens FROM users');
+    const tokens = [];
+    result.rows.forEach(row => {
+      const pt = row.push_tokens;
+      if (Array.isArray(pt)) pt.forEach(t => t && tokens.push(t));
+    });
+    
+    const messages = tokens.map(token => ({ to: token, title, body, sound: 'default' }));
+    
+    if (messages.length > 0) {
+      await axios.post('https://exp.host/--/api/v2/push/send', messages, {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    res.json({ success: true, sent: messages.length });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/admin/delete-user', adminMiddleware, async (req, res) => {
+  try {
+    const { email } = req.body;
+    await pool.query('DELETE FROM users WHERE email = $1', [email]);
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '3.0.0', db: 'postgresql' });
 });
