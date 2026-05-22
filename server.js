@@ -780,6 +780,16 @@ app.delete('/admin/delete-user', adminMiddleware, async (req, res) => {
   }
 });
 
+app.post('/subscription/activate-iap', authMiddleware, async (req, res) => {
+  try {
+    const future = Date.now() + 30*24*60*60*1000;
+    await pool.query('UPDATE users SET subscription_status = $1, trial_ends_at = $2 WHERE id = $3', ['active', future, req.user.id]);
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '3.0.0', db: 'postgresql' });
 });
