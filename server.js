@@ -790,6 +790,64 @@ app.post('/subscription/activate-iap', authMiddleware, async (req, res) => {
   }
 });
 
+app.get('/admin/analytics', adminMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, email, name, store_name, subscription_status, trial_ends_at, created_at FROM users ORDER BY created_at DESC');
+    const users = result.rows;
+    
+    // Users per day (last 30 days)
+    const last30 = [];
+    for (let i = 29; i >= 0; i--) {
+      const date = new Date();
+      date.setDate(date.getDate() - i);
+      const dateStr = date.toISOString().split('T')[0];
+      const count = users.filter(u => u.created_at && u.created_at.toISOString().split('T')[0] === dateStr).length;
+      last30.push({ date: dateStr, count });
+    }
+    
+    // Churn rate
+    const expired = users.filter(u => u.subscription_status === 'expired').length;
+    const totalPaid = users.filter(u => u.subscription_status === 'active' || u.subscription_status === 'expired').length;
+    const churnRate = totalPaid > 0 ? (expired / totalPaid * 100).toFixed(1) : 0;
+    
+    // Revenue
+    const premium = users.filter(u => u.subscription_status === 'active').length;
+    const mrr = premium * 9.99;
+    const arr = mrr * 12;
+    
+    // Active users (trial not expired)
+    const now = Date.now();
+    const activeTrials = users.filter(u => u.subscription_status === 'trial' && parseInt(u.trial_ends_at) > now).length;
+    
+    res.json({
+      users,
+      analytics: {
+        totalUsers: users.length,
+        premium,
+        trial: activeTrials,
+        expired,
+        mrr,
+        arr,
+        churnRate,
+        newUsersLast30: last30,
+        avgRevenuePerUser: premium > 0 ? (mrr / users.length).toFixed(2) : 0,
+      }
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/admin/maintenance', adminMiddleware, async (req, res) => {
+  const { enabled, message } = req.body;
+  global.maintenanceMode = { enabled, message: message || 'App is tijdelijk offline voor onderhoud.' };
+  res.json({ success: true, maintenanceMode: global.maintenanceMode });
+});
+
+app.get('/maintenance-status', (req, res) => {
+  res.json(global.maintenanceMode || { enabled: false });
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '3.0.0', db: 'postgresql' });
 });
