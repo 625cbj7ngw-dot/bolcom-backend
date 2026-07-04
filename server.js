@@ -49,6 +49,8 @@ async function initDB() {
       first_run BOOLEAN DEFAULT false,
       order_sound TEXT DEFAULT 'nieuwe_bestelling',
       stock_sound TEXT DEFAULT 'lowstock',
+      order_sound TEXT DEFAULT 'nieuwe_bestelling',
+      stock_sound TEXT DEFAULT 'lowstock',
       low_stock_threshold INTEGER DEFAULT 3,
       subscription_status TEXT DEFAULT 'trial',
       trial_ends_at BIGINT DEFAULT 0,
@@ -848,6 +850,16 @@ app.post('/admin/maintenance', adminMiddleware, async (req, res) => {
 
 app.get('/maintenance-status', (req, res) => {
   res.json(global.maintenanceMode || { enabled: false });
+});
+
+app.post('/settings/sounds', authMiddleware, async (req, res) => {
+  try {
+    const { orderSound, stockSound } = req.body;
+    await pool.query('UPDATE users SET order_sound = $1, stock_sound = $2 WHERE id = $3', [orderSound, stockSound, req.user.id]);
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/settings/sounds', authMiddleware, async (req, res) => {
