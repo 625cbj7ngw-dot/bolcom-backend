@@ -151,8 +151,10 @@ async function syncOrdersForUser(user) {
   try { await getBolToken(user); console.log("[Sync] Token OK!"); } catch(e) { console.error("[Sync] Token fout:", e.response?.data || e.message); return; }
   try {
     console.log("[Sync] Bestellingen ophalen...");
-    const orders = await fetchOrders(user, "OPEN");
-    console.log("[Sync] Bestellingen opgehaald:", orders.length);
+    const openOrders = await fetchOrders(user, "OPEN");
+    const shippedOrders = await fetchOrders(user, "SHIPPED");
+    const orders = [...openOrders, ...shippedOrders];
+    console.log("[Sync] Bestellingen opgehaald:", orders.length, "(open:", openOrders.length, "verzonden:", shippedOrders.length + ")");
     const knownIds = user.known_order_ids || [];
     const ordersCache = user.orders_cache || {};
 
