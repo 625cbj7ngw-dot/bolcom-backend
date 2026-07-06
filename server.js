@@ -358,11 +358,13 @@ app.post('/orders/:orderId/ship', authMiddleware, async (req, res) => {
   if (!req.user.bol_client_id) return res.status(400).json({ error: 'Geen bol.com credentials' });
   try {
     const token = await getBolToken(req.user);
-    await axios.post('https://api.bol.com/retailer/shipments', {
+    const shipBody = {
       orderItems: [{ orderItemId, quantity: 1 }],
       shipmentReference: trackingCode,
       transport: { transporterCode: transporterCode || 'POSTNL', trackAndTrace: trackingCode }
-    }, {
+    };
+    console.log('[Ship] Request body:', JSON.stringify(shipBody));
+    await axios.post('https://api.bol.com/retailer/shipments', shipBody, {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.retailer.v10+json', 'Content-Type': 'application/vnd.retailer.v10+json' }
     });
     if (req.user.orders_cache && req.user.orders_cache[orderId]) {
