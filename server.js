@@ -361,8 +361,7 @@ app.post('/orders/:orderId/ship', authMiddleware, async (req, res) => {
     const shipBody = {
       orderItems: [{ orderItemId, quantity: 1 }],
       shipmentReference: trackingCode,
-      transport: { transporterCode: transporterCode || 'POSTNL' },
-      trackingCode: trackingCode
+      transport: { transporterCode: transporterCode || 'POSTNL', trackAndTrace: trackingCode }
     };
     console.log('[Ship] Request body:', JSON.stringify(shipBody));
     await axios.post('https://api.bol.com/retailer/shipments', shipBody, {
