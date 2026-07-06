@@ -361,7 +361,7 @@ app.post('/orders/:orderId/ship', authMiddleware, async (req, res) => {
     await axios.post('https://api.bol.com/retailer/shipments', {
       orderItems: [{ orderItemId, quantity: 1 }],
       shipmentReference: trackingCode,
-      transport: { trackingCode, transporterCode: transporterCode || 'POSTNL' }
+      transport: { transporterCode: transporterCode || 'POSTNL', trackAndTrace: trackingCode }
     }, {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.retailer.v10+json', 'Content-Type': 'application/vnd.retailer.v10+json' }
     });
