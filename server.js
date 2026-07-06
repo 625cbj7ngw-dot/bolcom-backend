@@ -155,9 +155,18 @@ async function syncOrdersForUser(user) {
     const shippedOrders = await fetchOrders(user, "SHIPPED");
     const newOrders = [...openOrders, ...shippedOrders];
     
-    // Keep existing orders in cache, only add/update new ones
+    // Keep existing orders in cache, fetch full details for new orders
     const existingCache = user.orders_cache || {};
-    newOrders.forEach(o => { existingCache[o.orderId] = o; });
+    for (const o of newOrders) {
+      if (!existingCache[o.orderId] || !existingCache[o.orderId].orderItems?.[0]?.product?.title) {
+        try {
+          const detail = await fetchOrderDetail(user, o.orderId);
+          existingCache[o.orderId] = detail;
+        } catch(e) {
+          existingCache[o.orderId] = o;
+        }
+      }
+    }
     const orders = Object.values(existingCache);
     console.log("[Sync] Bestellingen opgehaald:", orders.length, "(open:", openOrders.length, "verzonden:", shippedOrders.length + ")");
     const knownIds = user.known_order_ids || [];
